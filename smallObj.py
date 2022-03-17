@@ -163,3 +163,4 @@ class Smallobj(nn.Module):
                                         stride=4 if i == 0 else 2,
                                         in_chans=in_chans if i == 0 else embed_dims[i - 1],
                                         embed_dim=embed_dims[i]) #
+        
