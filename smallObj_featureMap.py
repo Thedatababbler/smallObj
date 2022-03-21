@@ -281,16 +281,14 @@ class Smallobj(nn.Module):
         return policy_sample, distr
 
     def select_patch(self, x, policy_sample, keep_ratio=1/8):
-        #B, N, C = x.shape
-        x = self.patchify(x, N) #B, num_patch, patch
+        B, N, C = x.shape
+        x = self.patchify(x, N)
         len_keep = int(N * (keep_ratio))
         ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
 
         #keep the first 1/8
         ids_keep = ids_sorted[:, :len_keep] #
-        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep, C
-        x = 
-
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) 
 
         #x = self.unpatchify(x, len_keep) # [B, 3, h*p, w*p]
         return x, ids_sorted

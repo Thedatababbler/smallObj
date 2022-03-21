@@ -54,7 +54,7 @@ class Mlp(nn.Module):
         return x
 
 
-class Network(nn.Module):
+class Agent(nn.Module):
     def __init__(self, N, C):
         super().__init__()
         self.mlp = Mlp(N*C, 2*N*C, N)
