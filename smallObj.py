@@ -246,7 +246,7 @@ class Smallobj(nn.Module):
         imgs: (N, 3, H, W)
         x: (N, L, patch_size**2 *3)
         """
-        p = self.patch_embed.patch_size[0] #size of one patch (not number of !!)
+        p = patch_size#self.patch_embed.patch_size[0] #size of one patch (not number of !!)
         assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
 
         h = w = imgs.shape[2] // p
@@ -280,17 +280,21 @@ class Smallobj(nn.Module):
 
         return policy_sample, distr
 
-    def select_patch(self, x, policy_sample, keep_ratio=1/8):
-        #B, N, C = x.shape
-        x = self.patchify(x, N) #B, num_patch, patch
+    def select_patch(self, x, img, policy_sample, keep_ratio=1/8):
+        '''
+        x: x represents the tokens
+        img: img represents the original imgs
+        '''
+        B, N, C = x.shape
+        # first we patchify the original imgs into patches
+        x = self.patchify(img) #B, num_patch, patch
         len_keep = int(N * (keep_ratio))
         ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
 
         #keep the first 1/8
         ids_keep = ids_sorted[:, :len_keep] #
-        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep, C
-        x = 
-
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep(32), , from original pics
+        x = F.interpolate(x, scale_factor=2)
 
         #x = self.unpatchify(x, len_keep) # [B, 3, h*p, w*p]
         return x, ids_sorted
@@ -312,7 +316,7 @@ class Smallobj(nn.Module):
         #img shape: [B, 3, H=16*32]
         #second stage
         #scale and divide
-        img = F.interpolate(img, ())
+        #img = F.interpolate(img, ())
         x, H, W = self.patch_embed(img)
         
 
