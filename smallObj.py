@@ -1,3 +1,4 @@
+from email import policy
 from lib2to3.pgen2 import token
 from tkinter import W
 import torch
@@ -203,8 +204,8 @@ class OverlapPatchEmbed(nn.Module):
 
 
 class Smallobj(nn.Module):
-    def __init__(self, img_size=512, patch_size=[64, ], embed_dim=768, scaling=[2,2,2], num_stages=3,
-                in_chans=3, num_heads=12, mlp_ratio=4, depth=1):
+    def __init__(self, img_size=512, patch_size=[64, ], embed_dim=64, scaling=[2,2,2], num_stages=3,
+                in_chans=3, num_heads=8, mlp_ratio=4, depth=1):
         #self.num_classes = num_classes
         #self.depths = depths
         self.num_stages = num_stages
@@ -213,8 +214,11 @@ class Smallobj(nn.Module):
         #     for i in range(depth)
         # ])
         self.block = Block(embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
+        self.block2 = Block(4*embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
+        self.block3 = Block(16*embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
         
-
+        #self.cnn_divider = nn.Conv2d(embed_dim, embed_dim*4, kernel_size=16, stride=16)
+        #self.cnn_divider2 = nn.Conv2d(embed_dim*4, embed_dim*16, kernel_size=)
         # patch_embed = OverlapPatchEmbed(img_size=img_size if i == 0 else img_size // (2 ** (i + 1)),
         #                         patch_size=7 if i == 0 else 3,
         #                         stride=4 if i == 0 else 2,
@@ -222,7 +226,9 @@ class Smallobj(nn.Module):
         #                         embed_dim=embed_dims[i]) #
 
         #for i in range(num_stages):
-        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=32, in_chans=3, embed_dim=embed_dim)
+        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=16, in_chans=3, embed_dim=embed_dim)
+        self.patch_embed2 = OverlapPatchEmbed(img_size=32, patch_size=7, stride=4, in_chans=embed_dim, embed_dim=embed_dim*4)
+        self.patch_embed3 = OverlapPatchEmbed(img_size=8, patch_size=3, stride=2, in_chans=embed_dim*4, embed_dim=embed_dim*16)
 
     def initialize_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -249,12 +255,54 @@ class Smallobj(nn.Module):
         policy_sample = distr.sample()
 
         return policy_sample, distr
+    
+    def select_patch(self, x, policy_sample, keep_ratio=1/4):
+        '''
+        x: the input tokens with full length
+        policy_sample: the probs of keeping the patch
+        '''
+        B, N, C = x.shape
+        len_keep = int(N * (keep_ratio))
+        ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
+
+        #keep the first 1/4, Halve the H, W again
+        ids_keep = ids_sorted[:, :len_keep] #
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep=H*W/4, C
+
+        #trnasform x into featureMaps
+        # sqrt(N) = H/patch_size, W/patch_size
+        x = torch.reshape(B, C, int(N**0.5)/2, int(N**0.5)/2)# B, C, H/2, W/2
+        x = F.interpolate(x, scale_factor=2) #B, C, H, W
+        #x = torch.Conv2d
+
+        return x, ids_sorted
+
+    def agent_loss(self, x, ):
+        
 
     
     def forward(self, x):
-        x, H, W = self.patch_embed(x)
-        num_tokens = H*W #256
-        tokens = self.block(x)
+        #Stage 1
+        x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/16 = 32
+        num_tokens = H*W # 32**2=1024
+        assert num_tokens==x.shape[-1]*x.shape[-2], "check the H*W of inputs Xs"
+        x = self.block(x)# B, C, 1024
+        policy_sample, distr = self.agent_forward(x, num_tokens)
+        x = self.select_patch(x,policy_sample=policy_sample) #B, C, 32, 32
+        #Stage 2
+        x, H_2, W_2 = self.patch_embed2(x)#B, C*4, 32/4, 32/4
+        num_tokens = H_2*W_2 # 8*8=64
+        x = self.block2(x) #B, C*4, 64 
+        policy_sample2, distr2 = self.agent_forward(x, num_tokens) 
+        x = self.select_patch(x, policy_sample2)#B, C*4, H_2, W_2
+        #Stage 3
+        x, H_3, W_3 = self.patch_embed3(x) #B, C*4, 8/2, 8/2
+        num_tokens = H_3*W_3 # 4*4=16
+
+        
+
+        
+
 
 
         
