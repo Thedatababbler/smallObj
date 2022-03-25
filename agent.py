@@ -57,15 +57,21 @@ class Mlp(nn.Module):
 class Network(nn.Module):
     def __init__(self, N, C):
         super().__init__()
-        self.mlp = Mlp(N*C, 2*N*C, N)
+        #self.linearProj = nn.Linear(C, )
+        #self.mlp = Mlp(C*N, 2*N*C, N)
+        k = int(N**0.5)
+        self.conv = nn.Conv2d(C, C, kernel_size=k, stride=k)
+        self.linearProj = nn.Linear(C, N)
         # self.linearProj = nn.Linear(token_in_dim, token_out_dim)
         # self.linearInter = nn.Linear(out_size+token_out_dim*token_num, inter_dim)
         # self.linearOut = nn.Linear(inter_dim, num_classes)
         # self.embedding = nn.Linear()
         
-    def forward(self, tokens, H, W):
+    def forward(self, tokens):
         B, N, C = tokens.shape #C = embed_dim
-        out = self.mlp(tokens.reshape(B, N*C)) #B, N
+        k = int(N**0.5)
+        out = self.conv(tokens.reshape(B,C,k,k)) #B, N
+        out = self.linearProj(out.reshape(B, C))
         # imgs = self.resnet(imgs) # [B, 512]
         # tokens = self.linearProj(tokens) #[B, L, 512]
         # tokens =  torch.reshape(tokens, (tokens.shape[0], -1)) #[b, L*64]

@@ -68,6 +68,7 @@ class my_DataSet(Dataset):
             labels = torch.as_tensor(labels, dtype=torch.int64)
             target["boxes"] = bboxes
             target["labels"] = labels
+            
         else:
             bboxes = torch.as_tensor(bboxes, dtype=torch.float32)
             labels = torch.as_tensor(labels, dtype=torch.int64)

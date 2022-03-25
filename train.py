@@ -1,4 +1,5 @@
 from email.policy import default
+import datetime
 import torch
 import time
 import numpy as np
@@ -13,6 +14,10 @@ import torchvision.datasets as datasets
 
 import timm.optim.optim_factory as optim_factory
 
+from utils.utils import *
+from smallObj import Smallobj
+from train_one_epoch import train_one_epoch
+
 
 
 
@@ -22,14 +27,18 @@ def get_args_parser():
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--data_path', default='../datasets/tiny_set', type=str,
                         help='dataset root path')
+    parser.add_argument('--log_path', default='../logs', type=str)
+    parser.add_argument('--out_path', default='../outputs/trial1', type=str)
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=2022, type=int)
     parser.add_argument('--load', default=None, help='checkpoint path')
+    parser.add_argument('--start_epoch', default=0, type=int)
+    parser.add_argument('--lr', type=float, default=1e-3)
 
     ## optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05, help='weight decay (default: 0.05)')
-    
+    return parser
 
 def main(args):
     device = torch.device(args.device)
@@ -39,13 +48,13 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    log_writer = SummaryWriter(log_dir=args.log_path)
 
-    dataset_train = 
+    trainset = get_dataset('plane')
 
     data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-
-    )
+        trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
+    
 
     if args.load:
         '''
@@ -57,16 +66,24 @@ def main(args):
 
     #model = smallObj_model.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
     #model.to(device)
-
+    model = Smallobj().to(args.device)
     param_groups = optim_factory.add_weight_decay(model, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    
     #if args.gpu > 0
-    
 
     ### Start Training
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        train_stats = train_one_epoch(model, agent, data_loader_train)
+        train_stats = train_one_epoch(model, data_loader_train, optimizer, args.device, epoch, log_writer, args)
     
-    
+        total_time = time.time() - start_time
+        total_time_str =str(datetime.timedelta(seconds = int(total_time)))
+        print('Training time {}'.format(total_time_str))
+
+
+if __name__ == '__main__':
+    args = get_args_parser()
+    args = args.parse_args()
+    #if args.output_dir:
+    #    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    main(args)

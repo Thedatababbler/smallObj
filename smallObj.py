@@ -1,9 +1,11 @@
 from email import policy
 from lib2to3.pgen2 import token
+from nis import match
 from tkinter import W
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Bernoulli
 from functools import partial
 
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
@@ -11,6 +13,7 @@ from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg, PatchEmbed, Block
 
 from agent import Network
+from utils.utils import *
 import math
 
 class Mlp(nn.Module):
@@ -205,7 +208,8 @@ class OverlapPatchEmbed(nn.Module):
 
 class Smallobj(nn.Module):
     def __init__(self, img_size=512, patch_size=[64, ], embed_dim=64, scaling=[2,2,2], num_stages=3,
-                in_chans=3, num_heads=8, mlp_ratio=4, depth=1):
+                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3):
+        super().__init__()
         #self.num_classes = num_classes
         #self.depths = depths
         self.num_stages = num_stages
@@ -230,6 +234,12 @@ class Smallobj(nn.Module):
         self.patch_embed2 = OverlapPatchEmbed(img_size=32, patch_size=7, stride=4, in_chans=embed_dim, embed_dim=embed_dim*4)
         self.patch_embed3 = OverlapPatchEmbed(img_size=8, patch_size=3, stride=2, in_chans=embed_dim*4, embed_dim=embed_dim*16)
 
+        self.linearOut = nn.Linear(embed_dim*16, embed_dim)
+        self.classifer = nn.Linear(embed_dim, num_classes)
+        #under featuremap mode, rewards is sparse
+        self.weight1, self.weight2 = torch.Tensor([0.5]), torch.Tensor([0.5])
+        self.rewards = []
+
     def initialize_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -245,8 +255,9 @@ class Smallobj(nn.Module):
             if m.bias is not None:
                 m.bias.data.zero_()
     
-    def agent_forward(self, tokens, num_tokens, ):
-        self.policy = Network(H,W).to(tokens.device)
+    def agent_forward(self, tokens, num_tokens, ALPHA=0.8):
+        B, N, C = tokens.shape
+        self.agent = Network(N, C).to(tokens.device)
         out = self.agent(tokens)
         out = F.sigmoid(out)
         out = out*ALPHA + (1-ALPHA) * (1-ALPHA)
@@ -267,37 +278,62 @@ class Smallobj(nn.Module):
 
         #keep the first 1/4, Halve the H, W again
         ids_keep = ids_sorted[:, :len_keep] #
-        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep=H*W/4, C
-
+        #x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep=H*W/4, C
+        #self.rewards
         #trnasform x into featureMaps
         # sqrt(N) = H/patch_size, W/patch_size
-        x = torch.reshape(B, C, int(N**0.5)/2, int(N**0.5)/2)# B, C, H/2, W/2
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C))
+        x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
         x = F.interpolate(x, scale_factor=2) #B, C, H, W
         #x = torch.Conv2d
 
-        return x, ids_sorted
+        return x, ids_keep
 
-    def agent_loss(self, x, ):
+    def agent_loss(self, rewards, distr, policies, gamma=0.99, eps=0.001):
+        returns = torch.Tensor([gamma**2*rewards, gamma*rewards, rewards])
+        #returns = (returns - returns.mean())/(returns.std() + eps)
+        log_probs = [-distr.log_prob(policy)]
+        policy_loss = []
+        for log_prob, R in zip(log_probs, returns):
+            policy_loss.append(-log_prob * R)
         
-
+        policy_loss = torch.cat(policy_loss).sum()
+        return policy_loss
     
-    def forward(self, x):
+    def forward(self, x, y):
         #Stage 1
+        policies = []
         x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/16 = 32
         num_tokens = H*W # 32**2=1024
-        assert num_tokens==x.shape[-1]*x.shape[-2], "check the H*W of inputs Xs"
-        x = self.block(x)# B, C, 1024
+        #assert num_tokens==x.shape[-1]*x.shape[-2], "check the H*W of inputs Xs"
+        x, _ = self.block(x)# B, C, 1024
         policy_sample, distr = self.agent_forward(x, num_tokens)
-        x = self.select_patch(x,policy_sample=policy_sample) #B, C, 32, 32
+        policies.append(policy_sample)
+        x, ids_keep = self.select_patch(x,policy_sample=policy_sample) #B, C, 32, 32
         #Stage 2
         x, H_2, W_2 = self.patch_embed2(x)#B, C*4, 32/4, 32/4
         num_tokens = H_2*W_2 # 8*8=64
         x = self.block2(x) #B, C*4, 64 
-        policy_sample2, distr2 = self.agent_forward(x, num_tokens) 
-        x = self.select_patch(x, policy_sample2)#B, C*4, H_2, W_2
+        policy_sample2, distr = self.agent_forward(x, num_tokens) 
+        policies.append(policy_sample2)
+        x, _ = self.select_patch(x, policy_sample2)#B, C*4, H_2, W_2
         #Stage 3
         x, H_3, W_3 = self.patch_embed3(x) #B, C*4, 8/2, 8/2
         num_tokens = H_3*W_3 # 4*4=16
+        #classifier
+        x = self.linearOut(x)
+        preds = self.classifier(x)
+        loss = nn.CrossEntropyLoss(preds, y)
+        #self.rewards.append(compute_rewards(x))
+        #in token model, only one reward was received alast
+        self.rewards, match = compute_rewards(preds, y)
+        policy_loss = self.agent_loss(self.rewards, distr, policies)
+
+        loss_sum = self.weight1*loss + self.weight2*policy_loss
+        return loss_sum, match
+
+        
+
 
         
 
