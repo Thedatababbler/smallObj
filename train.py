@@ -13,9 +13,9 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
 import timm.optim.optim_factory as optim_factory
-
+from pathlib import Path
 from utils.utils import *
-from smallObj import Smallobj
+from smallObjLite import Smallobj
 from train_one_epoch import train_one_epoch
 
 
@@ -28,7 +28,7 @@ def get_args_parser():
     parser.add_argument('--data_path', default='../datasets/tiny_set', type=str,
                         help='dataset root path')
     parser.add_argument('--log_path', default='../logs', type=str)
-    parser.add_argument('--out_path', default='../outputs/trial1', type=str)
+    parser.add_argument('--output_dir', default='../outputs/trial1', type=str)
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=2022, type=int)
@@ -79,6 +79,18 @@ def main(args):
         total_time = time.time() - start_time
         total_time_str =str(datetime.timedelta(seconds = int(total_time)))
         print('Training time {}'.format(total_time_str))
+
+        output_dir = Path(args.output_dir)
+        epoch_name = str(epoch)
+        # checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch_name)]
+        # for checkpoint_path in checkpoint_paths:
+        #     to_save = {
+        #         'model': model.state_dict(),
+        #         'optimizer': optimizer.state_dict(),
+        #         'epoch': epoch,
+        #         #'scaler': loss_scaler.state_dict(),
+        #         'args': args,
+        #     }
 
 
 if __name__ == '__main__':

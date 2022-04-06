@@ -7,9 +7,9 @@ def compute_rewards(preds, targets, penalty=-1, distr=None, id_keeps=None):
     
     _, pred_idx = preds.max(1)
     match = (pred_idx==targets).data
-    reward = torch.ones(preds.shape)
-    reward[~pred_idx] = penalty
-
+    reward = torch.ones(targets.shape)
+    reward[~match] = penalty
+    reward = reward.to(preds.device)
     return reward, match
 
 def get_transform():

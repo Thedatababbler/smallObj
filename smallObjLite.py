@@ -173,6 +173,7 @@ class OverlapPatchEmbed(nn.Module):
         assert max(patch_size) > stride, "Set larger patch_size than stride"
         
         self.img_size = img_size
+        self.stride = stride
         self.patch_size = patch_size
         self.H, self.W = img_size[0] // stride, img_size[1] // stride
         self.num_patches = self.H * self.W
@@ -207,19 +208,18 @@ class OverlapPatchEmbed(nn.Module):
 
 
 class Smallobj(nn.Module):
-    def __init__(self, img_size=512, patch_size=[64, ], embed_dim=64, scaling=[2,2,2], num_stages=3,
-                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3):
+    def __init__(self, img_size=512, patch_size=63, embed_dim=512, stride=32, num_stages=3,
+                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3, keep_ratio=1/4):
         super().__init__()
         #self.num_classes = num_classes
         #self.depths = depths
+        self.keep_ratio = keep_ratio
         self.num_stages = num_stages
         # self.blocks = nn.ModuleList([
         #     Block(embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
         #     for i in range(depth)
         # ])
         self.block = Block(embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
-        self.block2 = Block(4*embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
-        self.block3 = Block(16*embed_dim, num_heads, mlp_ratio=mlp_ratio, qkv_bias=True)
         
         #self.cnn_divider = nn.Conv2d(embed_dim, embed_dim*4, kernel_size=16, stride=16)
         #self.cnn_divider2 = nn.Conv2d(embed_dim*4, embed_dim*16, kernel_size=)
@@ -230,11 +230,20 @@ class Smallobj(nn.Module):
         #                         embed_dim=embed_dims[i]) #
 
         #for i in range(num_stages):
-        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=31, stride=16, in_chans=3, embed_dim=embed_dim)
-        self.patch_embed2 = OverlapPatchEmbed(img_size=32, patch_size=7, stride=4, in_chans=embed_dim, embed_dim=embed_dim*4)
-        self.patch_embed3 = OverlapPatchEmbed(img_size=8, patch_size=3, stride=2, in_chans=embed_dim*4, embed_dim=embed_dim*16)
+        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=32, in_chans=3, embed_dim=embed_dim)
+        # Overlap embedding make the real patch_size is about the same as stride
 
-        self.linearOut = nn.Linear(embed_dim*16, embed_dim)
+        # B, C=embed_dim//16, W=input_size/stride//2, H=input_size/stride//2
+        len_keep = int((img_size//stride)**2*keep_ratio)
+        for i in range(int(len_keep)):
+            #smallConv = nn.Conv2d(embed_dim, embed_dim//16, patch_size=stride-1, stride=stride//2,
+            #                padding=( (stride-1)//2, (stride-1)//2))
+            smallConv = nn.Conv2d(3, embed_dim//16, kernel_size=stride*2, stride=stride*2)
+            #B, C=embed_dim//16, 1, 1
+            #smallConv = nn.Conv2d(embed)
+            setattr(self, f"smallConv{i+1}", smallConv) #B, C, W, H
+        self.small_embed_size = embed_dim//16
+        self.linearOut = nn.Linear(embed_dim//16*len_keep, embed_dim)
         self.classifier = nn.Linear(embed_dim, num_classes)
         #under featuremap mode, rewards is sparse
         self.conv2d = nn.Conv2d(embed_dim*16, embed_dim, 1)# -> B, embed_dim, 4, 4
@@ -270,13 +279,15 @@ class Smallobj(nn.Module):
 
         return policy_sample, distr
     
-    def select_patch(self, x, policy_sample, keep_ratio=1/4):
+    def select_patch(self, x, policy_sample, imgs):
         '''
         x: the input tokens with full length
         policy_sample: the probs of keeping the patch
         '''
-        B, N, C = x.shape
-        len_keep = int(N * (keep_ratio))
+        keep_ratio = self.keep_ratio
+        B1, N1, C1 = x.shape
+        B2, N2, C2 = imgs.shape
+        len_keep = int(N1 * (keep_ratio))
         ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
 
         #keep the first 1/4, Halve the H, W again
@@ -285,61 +296,81 @@ class Smallobj(nn.Module):
         #self.rewards
         #trnasform x into featureMaps
         # sqrt(N) = H/patch_size, W/patch_size
-        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C))
-        x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
-        x = F.interpolate(x, scale_factor=2) #B, C, H, W
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C1))
+        imgs = torch.gather(imgs, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C2))
+        #x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
+        imgs = imgs.reshape(B2, len_keep, 3, int((C2//3)**0.5), int((C2//3)**0.5))
+        imgs = F.interpolate(imgs, scale_factor=(1,2,2)) #B, N, C, H, W
         #x = torch.Conv2d
 
-        return x, ids_keep
+        return x, imgs, ids_keep
 
-    def agent_loss(self, rewards, log_probs, gamma=0.99, eps=0.001):
+    def agent_loss(self, rewards, distr, policy, gamma=0.99, eps=0.001):
         #returns = torch.Tensor([gamma**2*rewards, gamma*rewards, rewards])
-        returns = [gamma**2*rewards, gamma*rewards, rewards]
+        
         #returns = (returns - returns.mean())/(returns.std() + eps)
         #log_probs = [-distr.log_prob(policies)]
         #log_probs = [-distr.log_prob(p) for p in policies]
-        policy_loss = []
-        for log_prob, R in zip(log_probs, returns):
-            policy_loss.append(log_prob * R.unsqueeze(1).expand_as(log_prob))
+        log_probs = -distr.log_prob(policy)
+        policy_loss = log_probs * rewards.unsqueeze(1).expand_as(log_probs)
+        # for log_prob, R in zip(log_probs, returns):
+        #     policy_loss.append(log_prob * R.unsqueeze(1).expand_as(log_prob))
         
         #policy_loss = torch.cat(policy_loss).sum()
         return policy_loss
     
+    def patchify(self, imgs):
+        """
+        imgs: (N, 3, H, W)
+        x: (N, L, patch_size**2 *3)
+        """
+        p = self.patch_embed.stride #size of one patch (not number of !!)
+        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+        return x
+    
     def forward(self, x, y):
         #Stage 1
+        imgs = self.patchify(x)
         y = y.to(x.device)
-        policies = []
-        x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/16 = 32
-        num_tokens = H*W # 32**2=1024
+        #policies = []
+        x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/32 = 16
+        num_tokens = H*W # 16**2=256
         #assert num_tokens==x.shape[-1]*x.shape[-2], "check the H*W of inputs Xs"
-        x, _ = self.block(x)# B, C, 1024
+        x, _ = self.block(x)# B, C, 256
         policy_sample, distr = self.agent_forward(x, num_tokens)
-        policies.append(-distr.log_prob(policy_sample))
-        x, ids_keep = self.select_patch(x,policy_sample=policy_sample) #B, C, 32, 32
+        #policies.append(-distr.log_prob(policy_sample))
+        x, imgs, ids_keep = self.select_patch(x,policy_sample=policy_sample, imgs=imgs) #B, C, 32, 32
+        #imgs = imgs[:, :, ids_keep]
         #Stage 2
-        x, H_2, W_2 = self.patch_embed2(x)#B, C*4, 32/4, 32/4
-        num_tokens = H_2*W_2 # 8*8=64
-        x, _ = self.block2(x) #B, C*4, 64 
-        policy_sample2, distr = self.agent_forward(x, num_tokens) 
-        policies.append(-distr.log_prob(policy_sample2))
-        x, _ = self.select_patch(x, policy_sample2)#B, C*4, H_2, W_2
-        #Stage 3
-        x, H_3, W_3 = self.patch_embed3(x) #B, C*4, 8/2, 8/2
-        num_tokens = H_3*W_3 # 4*4=16
-        #classifier
-        x, _ = self.block3(x)
-        x = x.reshape(x.shape[0], -1, H_3, W_3)
-        x = self.conv2d(x).reshape(x.shape[0], -1)#B, H_3*W_3*embed_size 
+        outputs = []
+        # for i, idx in enumerate(ids_keep):
+        #     smallConv = getattr(self, f"smallConv{i+1}")
+        #     res = smallConv(imgs[:,:,idx]) #
+        #     outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
+
+        for i in range(64):
+            smallConv = getattr(self, f'smallConv{i+1}')
+            res = smallConv(imgs[:,i,:,:,:].squeeze(1))
+            outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
+
+
+        x = torch.cat(outputs, 1)
+        
+        #x = self.conv2d(x).reshape(x.shape[0], -1)#B, H_3*W_3*embed_size 
         x = self.linearOut(x)
         preds = self.classifier(x)
         loss = self.loss_func(preds, y)
         #self.rewards.append(compute_rewards(x))
         #in token model, only one reward was received alast
         self.rewards, match = compute_rewards(preds, y)
-        policy_loss1, policy_loss2 = self.agent_loss(self.rewards, policies)
+        policy_loss= self.agent_loss(self.rewards, distr, policy_sample)
 
-        loss_sum = loss + policy_loss1.mean() + policy_loss2.mean()#[loss, policy_loss1.mean(), policy_loss2.mean()]
-        return loss, policy_loss1.mean(), policy_loss2.mean(), match.float(), self.rewards
+        return loss, policy_loss.mean(), match.float(), self.rewards
 
         
 
