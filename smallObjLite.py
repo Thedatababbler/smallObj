@@ -2,12 +2,14 @@ from email import policy
 from lib2to3.pgen2 import token
 from nis import match
 from tkinter import W
+from unittest.mock import patch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Bernoulli
+from torchvision import transforms
 from functools import partial
-
+from PIL import Image
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg, PatchEmbed, Block
@@ -244,10 +246,11 @@ class Smallobj(nn.Module):
             setattr(self, f"smallConv{i+1}", smallConv) #B, C, W, H
         self.small_embed_size = embed_dim//16
         self.linearOut = nn.Linear(embed_dim//16*len_keep, embed_dim)
+        self.activision = F.sigmoid
         self.classifier = nn.Linear(embed_dim, num_classes)
         #under featuremap mode, rewards is sparse
-        self.conv2d = nn.Conv2d(embed_dim*16, embed_dim, 1)# -> B, embed_dim, 4, 4
-        self.weight1, self.weight2, self.weight3 = torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda')
+        #self.conv2d = nn.Conv2d(embed_dim*16, embed_dim, 1)# -> B, embed_dim, 4, 4
+        #self.weight1, self.weight2, self.weight3 = torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda')
         self.rewards = []
 
         self.loss_func = nn.CrossEntropyLoss()
@@ -279,7 +282,7 @@ class Smallobj(nn.Module):
 
         return policy_sample, distr
     
-    def select_patch(self, x, policy_sample, imgs):
+    def select_patch(self, x, policy_sample, imgs, epoch):
         '''
         x: the input tokens with full length
         policy_sample: the probs of keeping the patch
@@ -289,19 +292,31 @@ class Smallobj(nn.Module):
         B2, N2, C2 = imgs.shape
         len_keep = int(N1 * (keep_ratio))
         ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
-
+        unloader = transforms.ToPILImage()
         #keep the first 1/4, Halve the H, W again
         ids_keep = ids_sorted[:, :len_keep] #
         #x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1,1,C)) # B, len_keep=H*W/4, C
         #self.rewards
         #trnasform x into featureMaps
         # sqrt(N) = H/patch_size, W/patch_size
+        #imgs2 = imgs.copy()
         x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C1))
         imgs = torch.gather(imgs, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C2))
         #x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
         imgs = imgs.reshape(B2, len_keep, 3, int((C2//3)**0.5), int((C2//3)**0.5))
-        imgs = F.interpolate(imgs, scale_factor=(1,2,2)) #B, N, C, H, W
+        #imgs2 = imgs2.reshape(B2, N2, 3, int((C2//3)**0.5), int((C2//3)**0.5))
         #x = torch.Conv2d
+        imgs = F.interpolate(imgs, scale_factor=(1,2,2)) #B, N, C, H, W
+        if epoch%10 == 0:
+            for i in range(int(len_keep)):
+                patch = imgs[:,i,:,:,:]#.squeeze(1)
+                img = patch[0,:,:,:].cpu().clone()
+                #img = img.permute(1,2,0)#torch.reshape(img, [1,2,0])
+                #assert len(img.shape) == 3
+                #img = Image.fromarray(img.cpu().numpy(), 'RGB')
+                img = unloader(img)
+                img.save(f'epoch_{epoch}_selected{i}.jpg')
+        
 
         return x, imgs, ids_keep
 
@@ -317,24 +332,52 @@ class Smallobj(nn.Module):
         #     policy_loss.append(log_prob * R.unsqueeze(1).expand_as(log_prob))
         
         #policy_loss = torch.cat(policy_loss).sum()
-        return policy_loss
+        return policy_loss.mean()
     
     def patchify(self, imgs):
         """
         imgs: (N, 3, H, W)
         x: (N, L, patch_size**2 *3)
         """
+        
         p = self.patch_embed.stride #size of one patch (not number of !!)
         assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
 
         h = w = imgs.shape[2] // p
-        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
-        x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
-        return x
+        #hh = imgs.cpu().clone()
+        # img = imgs[0]#.permute(1,2,0)
+        # img = img.cpu().clone()
+        # img = unloader(img)
+        # img.save('example.jpg')
+        #img = Image.fromarray(img.cpu().numpy(), 'RGB')
+        new_img = torch.zeros(imgs.shape[0], h*w, p**2*3).to(imgs.device)
+        for i in range(int(h)):
+            for j in range(int(w)):
+                patches = imgs[:, :, i*p:(i+1)*p, j*p:(j+1)*p]
+                new_img[:, (i)*h + (j+1)-1, :] = patches.reshape(imgs.shape[0], 3*p**2)
+                # patches = patches[0]#.permute(1,2,0)
+                # patches = patches.cpu().clone()#Image.fromarray(patches.cpu().numpy(), 'RGB')
+                # patches = unloader(patches)
+                # patches.save(f'patch{i}_{j}.jpg')
+                
+        # x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        # x = torch.einsum('nchpwq->nhwpqc', x)
+        # x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+
+        #patch = new_img[0,0,:].reshape(3, p, p)
+        #patch = patch.permute(1,2,0)#torch.reshape(img, [1,2,0])
+        #assert len(patch.shape) == 3
+        #patch = unloader(patch)#Image.fromarray(patch.cpu().numpy(), 'RGB')
+        #patch.save('patch.jpg')
+        return new_img
     
-    def forward(self, x, y):
+    def forward(self, x, y, epoch):
         #Stage 1
+        unloader = transforms.ToPILImage()
+        # img = x[1]
+        # img = img.cpu().clone()
+        # img = unloader(img)
+        # img.save('example.jpg')
         imgs = self.patchify(x)
         y = y.to(x.device)
         #policies = []
@@ -344,7 +387,7 @@ class Smallobj(nn.Module):
         x, _ = self.block(x)# B, C, 256
         policy_sample, distr = self.agent_forward(x, num_tokens)
         #policies.append(-distr.log_prob(policy_sample))
-        x, imgs, ids_keep = self.select_patch(x,policy_sample=policy_sample, imgs=imgs) #B, C, 32, 32
+        x, imgs, ids_keep = self.select_patch(x,policy_sample=policy_sample, imgs=imgs, epoch=epoch) #B, C, 32, 32
         #imgs = imgs[:, :, ids_keep]
         #Stage 2
         outputs = []
@@ -355,7 +398,15 @@ class Smallobj(nn.Module):
 
         for i in range(64):
             smallConv = getattr(self, f'smallConv{i+1}')
-            res = smallConv(imgs[:,i,:,:,:].squeeze(1))
+            patch = imgs[:,i,:,:,:]#.squeeze(1)
+            img = patch[0,:,:,:]
+            img = img.permute(1,2,0)#torch.reshape(img, [1,2,0])
+            assert len(img.shape) == 3
+            img = Image.fromarray(img.cpu().numpy(), 'RGB')
+            img.save('selected.jpg')
+            img.show()
+            #res = smallConv(imgs[:,i,:,:,:].squeeze(1))
+            res = smallConv(patch)
             outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
 
 
@@ -363,14 +414,15 @@ class Smallobj(nn.Module):
         
         #x = self.conv2d(x).reshape(x.shape[0], -1)#B, H_3*W_3*embed_size 
         x = self.linearOut(x)
+        x = self.activision(x)
         preds = self.classifier(x)
         loss = self.loss_func(preds, y)
         #self.rewards.append(compute_rewards(x))
         #in token model, only one reward was received alast
-        self.rewards, match = compute_rewards(preds, y)
+        self.rewards, match = compute_rewards(preds, y, policy_sample)
         policy_loss= self.agent_loss(self.rewards, distr, policy_sample)
 
-        return loss, policy_loss.mean(), match.float(), self.rewards
+        return loss, policy_loss, match.float(), self.rewards
 
         
 

@@ -33,9 +33,9 @@ def train_one_epoch(model: torch.nn.Module, data_loader:Iterable, optimizer:torc
         samples = samples.to(device, non_blocking=True)
 
         #with torch.cuda.amp.autocast():
-        loss1, loss2, loss3, match, reward = model(samples, targets)
+        loss1, loss_policy, match, reward = model(samples, targets, epoch)
 
-        loss = loss1 + loss2 + loss3
+        loss = loss1 + loss_policy# + loss3
         loss_value = loss.item()
         #loss_value2 = loss2.item()
         #loss_value3 = loss3.item()
@@ -53,15 +53,15 @@ def train_one_epoch(model: torch.nn.Module, data_loader:Iterable, optimizer:torc
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss, epoch_1000x)
             log_writer.add_scalar('loss1', loss1, epoch_1000x)
-            log_writer.add_scalar('loss2', loss2, epoch_1000x)
-            log_writer.add_scalar('loss3', loss3, epoch_1000x)
+            log_writer.add_scalar('loss_policy', loss_policy, epoch_1000x)
+            #log_writer.add_scalar('loss3', loss3, epoch_1000x)
             log_writer.add_scalar('reward', reward.mean(), epoch_1000x)
 
     acc = torch.cat(matches, 0).mean()
     #loss_reduce = torch.cat(loss, 0).mean()
     #reward_reduce = torch.cat(reward, 0).mean()
     #print(f'Loss: {loss_reduce}, Rewards: {reward_reduce}, Acc: {acc}, Epoch: {epoch}')     
-    print(f'Loss: {loss}, Acc: {acc}, Epoch: {epoch}')   
+    print(f'Loss: {loss_value}, Acc: {acc}, Epoch: {epoch}')   
         
 
         

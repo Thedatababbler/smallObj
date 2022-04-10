@@ -3,11 +3,13 @@ import torch
 from torchvision.datasets import ImageFolder
 from torchvision import transforms as T
 
-def compute_rewards(preds, targets, penalty=-1, distr=None, id_keeps=None):
+def compute_rewards(preds, targets, policy, penalty=0, distr=None, id_keeps=None):
     
+    patch_use = policy.sum(1).float() / policy.size(1)
+    sparse_reward = 1.0 - patch_use**2
     _, pred_idx = preds.max(1)
     match = (pred_idx==targets).data
-    reward = torch.ones(targets.shape)
+    reward = sparse_reward#torch.ones(targets.shape)
     reward[~match] = penalty
     reward = reward.to(preds.device)
     return reward, match
@@ -18,7 +20,7 @@ def get_transform():
         T.RandomResizedCrop(512),
         T.RandomHorizontalFlip(),
         T.ToTensor(),
-        normalize,
+        #normalize,
     ])
     return transform
 
