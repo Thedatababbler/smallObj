@@ -15,7 +15,7 @@ import torchvision.datasets as datasets
 import timm.optim.optim_factory as optim_factory
 from pathlib import Path
 from utils.utils import *
-from smallObjLite import Smallobj
+from smallObjPatch import Smallobj
 from train_one_epoch import train_one_epoch
 
 

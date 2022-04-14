@@ -14,6 +14,7 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg, PatchEmbed, Block
 
+import resnet_cifar as resnet
 from agent import Network
 from utils.utils import *
 import math
@@ -211,7 +212,7 @@ class OverlapPatchEmbed(nn.Module):
 
 class Smallobj(nn.Module):
     def __init__(self, img_size=512, patch_size=63, embed_dim=512, stride=32, num_stages=3,
-                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3, keep_ratio=1/4):
+                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3, keep_ratio=1/16, num_tokens=64):
         super().__init__()
         #self.num_classes = num_classes
         #self.depths = depths
@@ -232,15 +233,18 @@ class Smallobj(nn.Module):
         #                         embed_dim=embed_dims[i]) #
 
         #for i in range(num_stages):
-        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=32, in_chans=3, embed_dim=embed_dim)
+        #self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=32, in_chans=3, embed_dim=embed_dim)
         # Overlap embedding make the real patch_size is about the same as stride
 
         # B, C=embed_dim//16, W=input_size/stride//2, H=input_size/stride//2
-        len_keep = int((img_size//stride)**2*keep_ratio)
+        self.num_tokens = num_tokens
+        #len_keep = int((img_size//stride)**2*keep_ratio)
+        len_keep = int(num_tokens*keep_ratio)
         for i in range(int(len_keep)):
             #smallConv = nn.Conv2d(embed_dim, embed_dim//16, patch_size=stride-1, stride=stride//2,
             #                padding=( (stride-1)//2, (stride-1)//2))
-            smallConv = nn.Conv2d(3, embed_dim//16, kernel_size=stride*2, stride=stride*2)
+            p = int(img_size//int(num_tokens**0.5))
+            smallConv = nn.Conv2d(3, embed_dim//16, kernel_size=p*2, stride=p*2)
             #B, C=embed_dim//16, 1, 1
             #smallConv = nn.Conv2d(embed)
             setattr(self, f"smallConv{i+1}", smallConv) #B, C, W, H
@@ -270,28 +274,34 @@ class Smallobj(nn.Module):
             if m.bias is not None:
                 m.bias.data.zero_()
     
-    def agent_forward(self, tokens, num_tokens, ALPHA=0.8):
-        B, N, C = tokens.shape
-        self.agent = Network(N, C).to(tokens.device)
-        out = self.agent(tokens)
-        out = F.sigmoid(out)
-        out = out*ALPHA + (1-ALPHA) * (1-out)
+    def agent_forward(self, x, num_tokens, ALPHA=0.8):
+        self.agent = resnet.ResNet(resnet.BasicBlock, [1,1,1,1], 4, num_tokens).to(x.device)
+        #B, N, C = tokens.shape
+        #self.agent = #Network(N, C).to(tokens.device)
+        probs = self.agent(x, 'lr')
+        probs = F.sigmoid(probs)
+        probs = probs*ALPHA + (1-ALPHA) * (1-probs)
 
-        distr = Bernoulli(out)
+        distr = Bernoulli(probs)
         policy_sample = distr.sample()
+
+        # policy_base = probs.data.clone()
+        # policy_base[policy_base<0.5]=0.0
+        # policy_base[policy_base>0.5]=1.0
 
         return policy_sample, distr
     
-    def select_patch(self, x, policy_sample, imgs, epoch):
+    def select_patch(self, policy_sample, imgs, epoch):
         '''
         x: the input tokens with full length
         policy_sample: the probs of keeping the patch
         '''
         keep_ratio = self.keep_ratio
-        B1, N1, C1 = x.shape
+        #B1, N1, C1 = x.shape
         B2, N2, C2 = imgs.shape
-        len_keep = int(N1 * (keep_ratio))
+        len_keep = int(N2 * (keep_ratio))
         ids_sorted = torch.argsort(policy_sample, dim=1, descending=True)
+        #t=policy_sample[ids_sorted]
         unloader = transforms.ToPILImage()
         #keep the first 1/4, Halve the H, W again
         ids_keep = ids_sorted[:, :len_keep] #
@@ -300,7 +310,7 @@ class Smallobj(nn.Module):
         #trnasform x into featureMaps
         # sqrt(N) = H/patch_size, W/patch_size
         #imgs2 = imgs.copy()
-        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C1))
+        #x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C1))
         imgs = torch.gather(imgs, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C2))
         #x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
         imgs = imgs.reshape(B2, len_keep, 3, int((C2//3)**0.5), int((C2//3)**0.5))
@@ -315,10 +325,10 @@ class Smallobj(nn.Module):
                 #assert len(img.shape) == 3
                 #img = Image.fromarray(img.cpu().numpy(), 'RGB')
                 img = unloader(img)
-                img.save(f'epoch_{epoch}_selected{i}.jpg')
+                img.save(f'epochhh_{epoch}_selected{i}.jpg')
         
 
-        return x, imgs, ids_keep
+        return imgs, ids_keep
 
     def agent_loss(self, rewards, distr, policy, gamma=0.99, eps=0.001):
         #returns = torch.Tensor([gamma**2*rewards, gamma*rewards, rewards])
@@ -334,14 +344,16 @@ class Smallobj(nn.Module):
         #policy_loss = torch.cat(policy_loss).sum()
         return policy_loss.mean()
     
-    def patchify(self, imgs):
+    def patchify(self, imgs, num_tokens):
         """
         imgs: (N, 3, H, W)
         x: (N, L, patch_size**2 *3)
         """
         
-        p = self.patch_embed.stride #size of one patch (not number of !!)
-        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+        #p = self.patch_embed.stride #size of one patch (not number of !!)
+        N, _, H, W = imgs.shape
+        p = H // int(num_tokens**0.5)
+        #assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
 
         h = w = imgs.shape[2] // p
         #hh = imgs.cpu().clone()
@@ -378,16 +390,17 @@ class Smallobj(nn.Module):
         # img = img.cpu().clone()
         # img = unloader(img)
         # img.save('example.jpg')
-        imgs = self.patchify(x)
+        num_tokens = 64
+        imgs = self.patchify(x, num_tokens)
         y = y.to(x.device)
         #policies = []
-        x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/32 = 16
-        num_tokens = H*W # 16**2=256
+        #x, H, W = self.patch_embed(x) #H, W = 512/stride = 512/32 = 16
+        #H*W # 16**2=256
         #assert num_tokens==x.shape[-1]*x.shape[-2], "check the H*W of inputs Xs"
-        x, _ = self.block(x)# B, C, 256
+        #x, _ = self.block(x)# B, C, 256
         policy_sample, distr = self.agent_forward(x, num_tokens)
         #policies.append(-distr.log_prob(policy_sample))
-        x, imgs, ids_keep = self.select_patch(x,policy_sample=policy_sample, imgs=imgs, epoch=epoch) #B, C, 32, 32
+        imgs, ids_keep = self.select_patch(policy_sample=policy_sample, imgs=imgs, epoch=epoch) #B, C, 32, 32
         #imgs = imgs[:, :, ids_keep]
         #Stage 2
         outputs = []
@@ -396,7 +409,7 @@ class Smallobj(nn.Module):
         #     res = smallConv(imgs[:,:,idx]) #
         #     outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
 
-        for i in range(64):
+        for i in range(ids_keep.shape[1]):
             smallConv = getattr(self, f'smallConv{i+1}')
             patch = imgs[:,i,:,:,:]#.squeeze(1)
             img = patch[0,:,:,:]

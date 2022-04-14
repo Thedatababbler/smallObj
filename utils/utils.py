@@ -31,6 +31,9 @@ def get_dataset(name, root='/ziyuanqin/projects/smallobj/train_data'):
         datasets = ImageFolder(root, transform)
     return datasets
 
-
-
-
+def get_model(model):
+    import resnet_cifar as resnet
+           
+    rnet_hr = resnet.ResNet(resnet.BasicBlock, [3,4,6,3], 3, 10)
+    rnet_lr = resnet.ResNet(resnet.BasicBlock, [3,4,6,3], 3, 10)
+    agent = resnet.ResNet(resnet.BasicBlock, [1,1,1,1], 3, 256)
