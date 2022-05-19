@@ -1,0 +1,8 @@
+# .gitignore
+dataset/
+images_bird/
+train_data/
+imgs/
+logs/
+logs_trail2/
+
