@@ -34,8 +34,9 @@ def train_one_epoch(model: torch.nn.Module, data_loader:Iterable, optimizer:torc
 
         #with torch.cuda.amp.autocast():
         loss1, loss_policy, match, reward = model(samples, targets, epoch)
-
-        loss = loss1 + loss_policy# + loss3
+        #loss1, match, reward = model(samples, targets, epoch)
+        #loss = loss1 
+        loss = loss1 + loss_policy
         loss_value = loss.item()
         #loss_value2 = loss2.item()
         #loss_value3 = loss3.item()
@@ -55,6 +56,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader:Iterable, optimizer:torc
             log_writer.add_scalar('loss1', loss1, epoch_1000x)
             log_writer.add_scalar('loss_policy', loss_policy, epoch_1000x)
             #log_writer.add_scalar('loss3', loss3, epoch_1000x)
+
             log_writer.add_scalar('reward', reward.mean(), epoch_1000x)
 
     acc = torch.cat(matches, 0).mean()

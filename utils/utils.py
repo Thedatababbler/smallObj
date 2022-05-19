@@ -3,6 +3,8 @@ import torch
 from torchvision.datasets import ImageFolder
 from torchvision import transforms as T
 
+
+
 def compute_rewards(preds, targets, policy, penalty=0, distr=None, id_keeps=None):
     
     patch_use = policy.sum(1).float() / policy.size(1)
@@ -14,20 +16,27 @@ def compute_rewards(preds, targets, policy, penalty=0, distr=None, id_keeps=None
     reward = reward.to(preds.device)
     return reward, match
 
-def get_transform():
-    normalize = T.Normalize(mean=[0.4, 0.4, 0.4], std=[0.2, 0.2, 0.2])
-    transform = T.Compose([
-        T.RandomResizedCrop(512),
-        T.RandomHorizontalFlip(),
-        T.ToTensor(),
-        #normalize,
-    ])
+def get_transform(name='plane'):
+    if name == 'plane':
+        normalize = T.Normalize(mean=[0.4205, 0.4205, 0.4205], std=[0.2131, 0.2131, 0.2131])
+        transform = T.Compose([
+            T.RandomResizedCrop(512),
+            T.RandomHorizontalFlip(),
+            T.ToTensor(),
+            normalize,
+        ])
+    if name == 'bird':
+        pass
+
     return transform
 
 
 def get_dataset(name, root='/ziyuanqin/projects/smallobj/train_data'):
     transform = get_transform()
     if name == 'plane':
+        datasets = ImageFolder(root, transform) 
+    if name == 'bird':
+        root = 'images_bird'
         datasets = ImageFolder(root, transform)
     return datasets
 

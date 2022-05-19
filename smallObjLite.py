@@ -13,11 +13,11 @@ from PIL import Image
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg, PatchEmbed, Block
-
+import resnet_cifar as resnet
 from agent import Network
 from utils.utils import *
 import math
-
+import time
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -210,8 +210,8 @@ class OverlapPatchEmbed(nn.Module):
 
 
 class Smallobj(nn.Module):
-    def __init__(self, img_size=512, patch_size=63, embed_dim=512, stride=32, num_stages=3,
-                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=3, keep_ratio=1/4):
+    def __init__(self, img_size=512, patch_size=127, embed_dim=512, stride=64, num_stages=3,
+                in_chans=3, num_heads=8, mlp_ratio=4, depth=1, num_classes=2, keep_ratio=1/4):
         super().__init__()
         #self.num_classes = num_classes
         #self.depths = depths
@@ -232,22 +232,25 @@ class Smallobj(nn.Module):
         #                         embed_dim=embed_dims[i]) #
 
         #for i in range(num_stages):
-        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=63, stride=32, in_chans=3, embed_dim=embed_dim)
+        self.patch_embed = OverlapPatchEmbed(img_size=img_size, patch_size=patch_size, stride=stride, in_chans=3, embed_dim=embed_dim)
         # Overlap embedding make the real patch_size is about the same as stride
 
         # B, C=embed_dim//16, W=input_size/stride//2, H=input_size/stride//2
         len_keep = int((img_size//stride)**2*keep_ratio)
-        for i in range(int(len_keep)):
-            #smallConv = nn.Conv2d(embed_dim, embed_dim//16, patch_size=stride-1, stride=stride//2,
-            #                padding=( (stride-1)//2, (stride-1)//2))
-            smallConv = nn.Conv2d(3, embed_dim//16, kernel_size=stride*2, stride=stride*2)
-            #B, C=embed_dim//16, 1, 1
-            #smallConv = nn.Conv2d(embed)
-            setattr(self, f"smallConv{i+1}", smallConv) #B, C, W, H
-        self.small_embed_size = embed_dim//16
-        self.linearOut = nn.Linear(embed_dim//16*len_keep, embed_dim)
-        self.activision = F.sigmoid
+        self.len_keep = len_keep
+        # for i in range(int(len_keep)):
+        #     #smallConv = nn.Conv2d(embed_dim, embed_dim//16, patch_size=stride-1, stride=stride//2,
+        #     #                padding=( (stride-1)//2, (stride-1)//2))
+        #     smallConv = nn.Conv2d(3, embed_dim//16, kernel_size=stride*2, stride=stride*2)
+        #     #B, C=embed_dim//16, 1, 1
+        #     #smallConv = nn.Conv2d(embed)
+        #     setattr(self, f"smallConv{i+1}", smallConv) #B, C, W, H
+        self.small_embed_size = embed_dim//4
+        self.linearOut = nn.Linear(self.small_embed_size, embed_dim)
+        self.activision = F.tanh
         self.classifier = nn.Linear(embed_dim, num_classes)
+        self.agent = Network((img_size//stride)**2, embed_dim)
+        self.extractor = resnet.ResNet(resnet.BasicBlock, [2,2,2,2], 4, self.small_embed_size)
         #under featuremap mode, rewards is sparse
         #self.conv2d = nn.Conv2d(embed_dim*16, embed_dim, 1)# -> B, embed_dim, 4, 4
         #self.weight1, self.weight2, self.weight3 = torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda'), torch.Tensor([0.33]).to('cuda')
@@ -272,7 +275,7 @@ class Smallobj(nn.Module):
     
     def agent_forward(self, tokens, num_tokens, ALPHA=0.8):
         B, N, C = tokens.shape
-        self.agent = Network(N, C).to(tokens.device)
+        # self.agent = Network(N, C).to(tokens.device)
         out = self.agent(tokens)
         out = F.sigmoid(out)
         out = out*ALPHA + (1-ALPHA) * (1-out)
@@ -301,24 +304,42 @@ class Smallobj(nn.Module):
         # sqrt(N) = H/patch_size, W/patch_size
         #imgs2 = imgs.copy()
         x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C1))
-        imgs = torch.gather(imgs, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C2))
+        imgs2 = torch.gather(imgs, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, C2))
         #x = x.reshape(B, C, int((N**0.5)/2), int((N**0.5)/2))# B, C, H/2, W/2
-        imgs = imgs.reshape(B2, len_keep, 3, int((C2//3)**0.5), int((C2//3)**0.5))
+        imgs2 = imgs2.reshape(B2, len_keep, 3, int((C2//3)**0.5), int((C2//3)**0.5))
+        imgs = imgs.reshape(B2, N2, 3, int((C2//3)**0.5), int((C2//3)**0.5))
         #imgs2 = imgs2.reshape(B2, N2, 3, int((C2//3)**0.5), int((C2//3)**0.5))
         #x = torch.Conv2d
-        imgs = F.interpolate(imgs, scale_factor=(1,2,2)) #B, N, C, H, W
-        if epoch%10 == 0:
+        #imgs = F.interpolate(imgs, scale_factor=(1,2,2)) #B, N, C, H, W
+        if epoch%5 == 0 and np.random.randint(10)==1:
             for i in range(int(len_keep)):
                 patch = imgs[:,i,:,:,:]#.squeeze(1)
                 img = patch[0,:,:,:].cpu().clone()
                 #img = img.permute(1,2,0)#torch.reshape(img, [1,2,0])
                 #assert len(img.shape) == 3
-                #img = Image.fromarray(img.cpu().numpy(), 'RGB')
-                img = unloader(img)
-                img.save(f'epoch_{epoch}_selected{i}.jpg')
+                h = w = int(N2**0.5)
+                p = int((C2//3)**0.5)
+                new_img = torch.zeros(imgs.shape[0], 3, p*h, p*w).to(imgs.device)
+                for k in range(B2):
+                    for i in range(int(h)):
+                        for j in range(int(w)):
+                            #patches = imgs[:, :, i*p:(i+1)*p, j*p:(j+1)*p]
+                            index = i*h + (j+1)-1
+                            if index in ids_keep[k]: #WARNING! in this way, any index in any ids_keep of the 32-szie batch would be selected, that enlarge the keep numbers
+                                patches = imgs[k, index, :].reshape(1, 3, p, p)
+                                new_img[k, :, i*p:(i+1)*p, j*p:(j+1)*p] = patches
+                            #new_img[:, (i)*h + (j+1)-1, :] = patches.reshape(imgs.shape[0], 3*p**2)
+                # m = (new_img != 0).float()
+                # su = torch.sum(m, [2, 3])
+                # #img = Image.fromarray(img.cpu().numpy(), 'RGB')
+                # img = unloader(img)
+                # img.save(f'epoch_{epoch}_selected{i}.jpg')
+                tmp_idx = np.random.randint(B1)
+                out = unloader(new_img[tmp_idx].cpu().clone())
+                out.save(f'./imgs/{int(len_keep)}patches/transformer_epoch_{epoch}_full_{str(time.time())}_img.jpg')
         
 
-        return x, imgs, ids_keep
+        return x, imgs2, ids_keep
 
     def agent_loss(self, rewards, distr, policy, gamma=0.99, eps=0.001):
         #returns = torch.Tensor([gamma**2*rewards, gamma*rewards, rewards])
@@ -388,6 +409,7 @@ class Smallobj(nn.Module):
         policy_sample, distr = self.agent_forward(x, num_tokens)
         #policies.append(-distr.log_prob(policy_sample))
         x, imgs, ids_keep = self.select_patch(x,policy_sample=policy_sample, imgs=imgs, epoch=epoch) #B, C, 32, 32
+        ## imgs shape: B, selected_N, channel, 32, 32
         #imgs = imgs[:, :, ids_keep]
         #Stage 2
         outputs = []
@@ -396,25 +418,27 @@ class Smallobj(nn.Module):
         #     res = smallConv(imgs[:,:,idx]) #
         #     outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
 
-        for i in range(64):
-            smallConv = getattr(self, f'smallConv{i+1}')
-            patch = imgs[:,i,:,:,:]#.squeeze(1)
-            img = patch[0,:,:,:]
-            img = img.permute(1,2,0)#torch.reshape(img, [1,2,0])
-            assert len(img.shape) == 3
-            img = Image.fromarray(img.cpu().numpy(), 'RGB')
-            img.save('selected.jpg')
-            img.show()
-            #res = smallConv(imgs[:,i,:,:,:].squeeze(1))
-            res = smallConv(patch)
-            outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
+        # for i in range(self.len_keep):
+        #     smallConv = getattr(self, f'smallConv{i+1}')
+        #     patch = imgs[:,i,:,:,:]#.squeeze(1)
+        #     img = patch[0,:,:,:]
+        #     img = img.permute(1,2,0)#torch.reshape(img, [1,2,0])
+        #     assert len(img.shape) == 3
+        #     img = Image.fromarray(img.cpu().numpy(), 'RGB')
+        #     img.save('selected.jpg')
+        #     img.show()
+        #     #res = smallConv(imgs[:,i,:,:,:].squeeze(1))
+        #     res = smallConv(patch)
+        #     outputs.append(res.reshape(imgs.shape[0], self.small_embed_size))
 
 
-        x = torch.cat(outputs, 1)
+        outputs2 = imgs.reshape(imgs.shape[0]*imgs.shape[1], imgs.shape[2], imgs.shape[3], imgs.shape[4]) # B*N, channel, 32, 32
+        x = self.extractor(outputs2, 'hr').reshape(imgs.shape[0], imgs.shape[1], self.small_embed_size)
+        #x = torch.stack(outputs, 1)
+        x = torch.mean(x, 1)
         
         #x = self.conv2d(x).reshape(x.shape[0], -1)#B, H_3*W_3*embed_size 
-        x = self.linearOut(x)
-        x = self.activision(x)
+        x = self.activision(self.linearOut(x))
         preds = self.classifier(x)
         loss = self.loss_func(preds, y)
         #self.rewards.append(compute_rewards(x))
